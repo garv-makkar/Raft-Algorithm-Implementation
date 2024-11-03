@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+message LogEntry {
+    int32 term = 1;
+    string operation = 2;
+    int32 index = 3;
+}
+
+message RequestVoteArgs {
+    int32 term = 1;
+    int32 candidate_id = 2;
+    int32 last_log_index = 3;
+    int32 last_log_term = 4;
+}
+
+message RequestVoteReply {
+    int32 term = 1;
+    bool vote_granted = 2;
+    int32 remaining_lease = 3;
+}
+
+message AppendEntriesArgs {
+    int32 term = 1;
+    int32 leader_id = 2;
+    int32 prev_log_index = 3;
+    int32 prev_log_term = 4;
+    repeated LogEntry entries = 5;
+    int32 leader_commit = 6;
+    int32 remaining_lease = 7;
+}
+
+message AppendEntriesReply {
+    int32 term = 1;
+    bool success = 2;
+}
+
+message ServeClientArgs {
+  string Request = 1;
+}
+
+message ServeClientReply {
+  string Data = 1;
+  string LeaderID = 2;
+  bool Success = 3;
+}
+
+service Raft {
+    rpc RequestVote(RequestVoteArgs) returns (RequestVoteReply) {}
+    rpc AppendEntries(AppendEntriesArgs) returns (AppendEntriesReply) {}
+    rpc ServeClient (ServeClientArgs) returns (ServeClientReply) {}
+}
