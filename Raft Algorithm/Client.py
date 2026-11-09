@@ -2,40 +2,46 @@ import grpc
 import raft_pb2
 import raft_pb2_grpc
 import random
+import time
+from cluster_config import addresses, base_port, node_count
 
-nodeAddresses = []
-for i in range(5):
-    nodeAddresses.append(f"localhost:{50051 + i}")
+nodeAddresses = addresses()
 
 
 class Client:
-    def __init__(self, clientAddress):
+    def __init__(self, clientAddress=None, nodes=None):
         self.clientAddress = clientAddress
         self.leader = None
         self.client_id = str(random.randint(1, 1000))
-        self.channels = [grpc.insecure_channel(node) for node in nodeAddresses]
+        self.nodes = nodeAddresses if nodes is None else nodes
+        self.channels = [grpc.insecure_channel(node) for node in self.nodes]
         self.stubs = [raft_pb2_grpc.RaftStub(
             channel) for channel in self.channels]
 
     def letsGoo(self):
-        while True:
-            operation, key, value = self.userInput()
-            if operation == "GET":
-                response = self.get(key)
-                print(response.Data)
-            elif operation == "SET":
-                response = self.set(key, value)
-                print(response.Data)
-            else:
-                print("Invalid input format.")
-
-    def userInput(self):
-        print("Enter your query")
-        input_string = input().split()
-        operation = input_string[0]
-        key = input_string[1] if len(input_string) > 1 else None
-        value = input_string[2] if len(input_string) == 3 else None
-        return operation, key, value
+        print("Commands: SET key value | GET key | EXIT")
+        try:
+            while True:
+                query = input("> ").strip()
+                if query.upper() in {"EXIT", "QUIT"}:
+                    break
+                parts = query.split()
+                if not parts:
+                    continue
+                parts[0] = parts[0].upper()
+                if not ((parts[0] == "SET" and len(parts) == 3) or
+                        (parts[0] == "GET" and len(parts) == 2)):
+                    print("Use SET key value or GET key (single-word keys and values)")
+                    continue
+                try:
+                    print(self.sendRequest(" ".join(parts)).Data)
+                except (TimeoutError, ValueError) as error:
+                    print(error)
+        except (EOFError, KeyboardInterrupt):
+            print("\nClient stopped.")
+        finally:
+            for channel in self.channels:
+                channel.close()
 
     def get(self, key):
         return self.sendRequest(f"GET {key}")
@@ -43,47 +49,38 @@ class Client:
     def set(self, key, value):
         return self.sendRequest(f"SET {key} {value}")
 
-    def sendRequest(self, request):
-        while True:
-            response = self.sendReqToLeader(request)
-            if response:
-                return response
-
-    def sendReqToLeader(self, request):
-        if self.leader is None:
-            return self.findLeaderAndSendReq(request)
-        return self.sendReqToCurrLeader(request)
-
-    def findLeaderAndSendReq(self, request):
-        for i, stub in enumerate(self.stubs):
-            try:
-                response = stub.ServeClient(
-                    raft_pb2.ServeClientArgs(Request=request))
-                if response.Success:
-                    self.leader = str(response.LeaderID)
-                    print("Leader is: ", self.leader)
-                    return response
-                elif response.LeaderID:
-                    self.leader = response.LeaderID
+    def sendRequest(self, request, timeout=12):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            order = list(range(len(self.stubs)))
+            if self.leader is not None:
+                order.remove(self.leader)
+                order.insert(0, self.leader)
+            for peer in order:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
-            except grpc.RpcError:
-                # print(f"Unable to connect to the node: {i}, it may be down")
-                pass
-        return None
-
-    def sendReqToCurrLeader(self, request):
-        try:
-            response = self.stubs[int(self.leader)].ServeClient(
-                raft_pb2.ServeClientArgs(Request=request))
-            if response.Success:
-                return response
-            else:
-                self.leader = None if not response.LeaderID else response.LeaderID
-        except grpc.RpcError:
-            self.leader = None
-        return None
+                try:
+                    response = self.stubs[peer].ServeClient(
+                        raft_pb2.ServeClientArgs(Request=request), timeout=min(5, remaining))
+                    known = response.LeaderID
+                    self.leader = int(known) if known in {str(i) for i in range(len(self.stubs))} else None
+                    if response.Success:
+                        return response
+                except grpc.RpcError as error:
+                    if error.code() == grpc.StatusCode.INVALID_ARGUMENT:
+                        raise ValueError(error.details()) from error
+                    if self.leader == peer:
+                        self.leader = None
+            time.sleep(0.1)
+        raise TimeoutError("No majority/leader available. A timed-out SET may still commit.")
 
 
 if __name__ == "__main__":
-    client = Client("localhost:50050")
+    import argparse
+    parser = argparse.ArgumentParser(description="Connect to a local Raft cluster")
+    parser.add_argument("--nodes", type=node_count, default=5)
+    parser.add_argument("--base-port", type=base_port, default=50051)
+    args = parser.parse_args()
+    client = Client(nodes=addresses(args.nodes, args.base_port))
     client.letsGoo()
